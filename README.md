@@ -12,6 +12,18 @@ garmin-kit is a small, read-only toolkit for the [Garmin Connect Personal API](h
 
 Everything is read-only: it never writes to your Garmin account.
 
+### Full-resolution records over MCP
+
+If `get_records` exceeds the response size limit, call `get_records_page` with
+`{"activityId":"24844279877","offset":0,"limit":100}`. Append the returned
+`records`, then call again with the returned `nextOffset` until it is `null`.
+`totalRecords` reports the full sample count. No samples are downsampled or fields
+removed; pages may contain fewer than `limit` samples to stay within the serialized
+size budget. Each call downloads and parses the FIT activity again, so fetch pages
+sequentially and avoid repeatedly retrieving completed pages. An individual record
+that exceeds the page budget returns an explicit error rather than skipping data.
+The existing `get_records` tool and CLI commands are unchanged.
+
 ## Requirements
 
 - Node.js 20 or newer (`node -v`), npm and git
