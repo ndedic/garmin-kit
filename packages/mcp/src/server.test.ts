@@ -20,7 +20,10 @@ const text = (result: unknown) => ((result as { content: { text: string }[] }).c
 test("lists only MCP-exposed tools with JSON schemas", async () => {
   const { tools: listed } = await (await connect()).listTools();
   const names = listed.map((t) => t.name).sort();
-  assert.deepEqual(names, ["analyse_run", "get_activity", "get_laps", "get_records", "list_runs"]);
+  assert.deepEqual(names, [
+    "analyse_run", "get_activity", "get_body_battery", "get_daily_summaries", "get_heart_rate", "get_hrv", "get_hrv_summaries",
+    "get_laps", "get_records", "get_sleep", "get_sleep_summaries", "list_runs",
+  ]);
   assert.ok(!names.includes("download_activity"));
   const records = listed.find((t) => t.name === "get_records")!;
   assert.deepEqual(records.inputSchema.required, ["activityId"]);

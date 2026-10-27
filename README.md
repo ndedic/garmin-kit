@@ -4,7 +4,7 @@ A read-only CLI for the [Garmin Connect Personal API](https://developer.garmin.c
 
 - Requires Node.js 20+ and a Garmin Connect Personal API key.
 - Read-only: it never writes to your Garmin account.
-- Your key is read from `.env` or the environment, exchanged for a short-lived token on each call, and never printed or cached.
+- Your key is read from the environment or the repo's `.env` and is never printed or written anywhere else. It is exchanged for a 24-hour access token, which is cached (see [Security notes](#security-notes)).
 
 ## Install
 
@@ -17,7 +17,7 @@ npm link                      # puts `garmin` on your PATH
 cp .env.example .env          # then put your key in .env
 ```
 
-Create the key on Garmin Connect web under **Profile & Account → Settings → Personal API Key**. `.env` is git-ignored, and an existing `GARMIN_PERSONAL_API_KEY` environment variable takes precedence. The CLI finds the project's `.env` from any directory.
+Create the key on Garmin Connect web under **Profile & Account → Settings → Personal API Key**. `.env` is git-ignored, and an existing `GARMIN_PERSONAL_API_KEY` environment variable takes precedence. The CLI and MCP server read **only** `GARMIN_PERSONAL_API_KEY`, and only from the repo's own `.env`; a `.env` in whatever directory you run from is deliberately ignored. Run `chmod 600 .env`.
 
 If `garmin` isn't found after `npm link`, make sure your npm global bin directory is on `PATH` (`npm prefix -g`, then `bin/`).
 
@@ -32,7 +32,15 @@ garmin runs --date 2026-10-20
 garmin activity 123456789
 garmin laps 123456789          # parsed from the FIT export
 garmin records 123456789       # per-second samples (large!)
-garmin download 123456789 [--format fit|zip|json] [--output FILE]
+garmin download 123456789 [--format fit|zip|json] [--output FILE]   # --output must be relative, no ..
+
+# wellness (date defaults to today; ranges to the last 7 days, max 90)
+garmin sleep [--date YYYY-MM-DD]
+garmin sleep-summaries [--start-date D] [--end-date D]
+garmin hrv [--date D]  |  garmin hrv-summaries [--start-date D] [--end-date D]
+garmin body-battery [--start-date D] [--end-date D]
+garmin heart-rate [--date D]            # includes resting heart rate
+garmin daily-summaries [--start-date D] [--end-date D]
 ```
 
 Activity IDs come from `runs` / `last-run`. `download` refuses to overwrite an existing file.
@@ -45,6 +53,7 @@ About 90 lines of JSON designed for people and LLMs:
 - per-km splits with pace, HR, cadence and power
 - first-half vs second-half pace and HR, pacing label (negative / even / positive split) and HR drift
 - comparison against your previous 3 runs
+- **recovery** going into the run: sleep hours and score, HRV against your baseline, resting HR against the previous week, and Body Battery at the start and its drop from the run (best effort: any part Garmin has no data for is simply omitted)
 
 Units are in the field names (`distance_km`, `pace_min_per_km`, `cadence_spm`). Name, GPS coordinates and profile images are deliberately left out. The other commands print raw Garmin JSON, which can contain private location and health data.
 
@@ -76,7 +85,7 @@ Troubleshooting:
 
 ## Set up as an MCP server
 
-The same tools are available over MCP (stdio), which also works in Claude Desktop and any other MCP client. Tools exposed: `list_runs`, `analyse_run`, `get_activity`, `get_laps`, `get_records`. All are read-only. `download_activity` is CLI-only because it writes files. Results over 200,000 characters are refused with a hint to narrow the request.
+The same tools are available over MCP (stdio), which also works in Claude Desktop and any other MCP client. Tools exposed: `list_runs`, `analyse_run`, `get_activity`, `get_laps`, `get_records`, plus the wellness tools `get_sleep`, `get_sleep_summaries`, `get_hrv`, `get_hrv_summaries`, `get_body_battery`, `get_heart_rate` and `get_daily_summaries`. All are read-only. `download_activity` is CLI-only because it writes files. Results over 200,000 characters are refused with a hint to narrow the request.
 
 ```sh
 npm run build
@@ -114,7 +123,7 @@ scripts/gen-skill.ts            regenerates the skill's tool list
 
 **Tools live in core.** `packages/core/src/tools.ts` has two layers:
 
-1. **Orthogonal primitives**: plain async Node functions that each do one job and know nothing about any interface: `listRuns`, `getActivity`, `getLaps`, `getRecords`, `downloadActivity`. `analyseRun` only composes them with the pure `analyse()` function.
+1. **Orthogonal primitives**: plain async Node functions that each do one job and know nothing about any interface: `listRuns`, `getActivity`, `getLaps`, `getRecords`, `downloadActivity` and the wellness readers (`getSleep`, `getHrvSummaries`, `getBodyBattery`, `getHeartRate`, ...). `analyseRun` only composes them with the pure `analyse()` function.
 2. **Tool definitions**: plain data (name, description, params, which surfaces expose it) plus a thin adapter to the function above.
 
 The CLI, the MCP server and the skill docs are all derived from the definitions, so a new tool is written once:
@@ -123,7 +132,7 @@ The CLI, the MCP server and the skill docs are all derived from the definitions,
 |---|---|
 | CLI | command, flags, validation and `--help` from `params` (`packages/cli`) |
 | MCP | each tool with `"mcp"` in `surfaces`, params mapped to JSON schema (`toJsonSchema`); `download_activity` stays CLI-only because it writes files (`packages/mcp`) |
-| Skill | `npm run gen:skill` rewrites the tool list in `skills/garmin/SKILL.md`; `npm run check:skill` fails if it is stale |
+| Skill | `npm run gen:skill` rewrites the tool list in `skills/garmin/SKILL.md`; `npm run check:skill` fails if it is stale. Tools flagged `writes` (download) are left out so the model never offers to write files |
 
 To add a tool: write the function, add a definition to `tools`, run `npm run build && npm run gen:skill`.
 
@@ -137,6 +146,13 @@ npm run gen:skill    # refresh the skill's tool list
 npm run check:skill  # CI check that it is up to date
 ```
 
+## Security notes
+
+- **Token cache.** The 24-hour access token is cached in `~/.config/garmin/connect-personal-api-bearer-token.json` (directory `0700`, file `0600`), the same location and format as Garmin's own [`garmin-personal-api`](https://github.com/garmin/connect-personal-api-python) client, so both share it. It is reused while more than an hour remains, is tied to your key by a SHA-256 fingerprint (the key itself is never stored), and is refreshed automatically after a 401. Delete the file to force a new exchange. Revoking your key on Garmin Connect invalidates it.
+- **Environment.** Only `GARMIN_PERSONAL_API_KEY` is read from a `.env` file, and only from the repo's own. Other variables in it, and any `.env` in the current directory, are ignored.
+- **Network.** The only peer is `https://personal.connectapi.garmin.com`. Redirects are never followed, so the key and token cannot be sent elsewhere.
+- **Files.** `download` is the only command that writes files. It is CLI-only, is not offered by the skill or MCP server, refuses to overwrite, creates files `0600`, and accepts only relative `--output` paths without `..`. Downloaded `activity-*` files are git-ignored.
+
 ## Privacy
 
-Personal-API data includes health metrics and GPS tracks. Keep `.env` private, and be careful where you paste raw `activity`, `laps` or `records` output.
+Personal-API data includes health metrics and GPS tracks. Sleep, HRV, heart rate and Body Battery are health data too. Keep `.env` private, and be careful where you paste raw `activity`, `laps`, `records` or wellness output.

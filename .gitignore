@@ -4,3 +4,7 @@ dist/
 .env
 .env.*
 !.env.example
+# files created by `garmin download` (health and GPS data)
+activity-*.fit
+activity-*.zip
+activity-*.json
