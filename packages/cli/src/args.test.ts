@@ -31,7 +31,7 @@ test("runs validates limit and date", () => {
 
 test("activity commands require a positive numeric id", () => {
   assert.deepEqual(parse(["laps", "123"]), { tool: "get_laps", input: { activityId: "123" } });
-  fails(["activity", "0"], /positive integer/);
+  fails(["activity", "0"], /positive integer activity ID/);
   fails(["records", "abc"], /positive integer/);
   fails(["laps"], /Missing required activityId/);
   fails(["laps", "1", "2"], /Unexpected argument/);
@@ -53,6 +53,24 @@ test("download defaults and options", () => {
   fails(["download", "9", "--format", "gpx"], /must be one of: fit, zip, json/);
   fails(["download", "9", "--format", "fit", "--format", "zip"], /more than once/);
   fails(["download", "9", "--output"], /Missing value/);
+});
+
+test("duplicate assignments are rejected whichever way they arrive", () => {
+  fails(["laps", "1", "--activity-id", "2"], /more than once/);
+  fails(["laps", "--activity-id", "2", "3"], /more than once/);
+  fails(["runs", "--limit", "1", "--limit", "2"], /more than once/);
+});
+
+test("argv numbers are coerced only when they are clean integers", () => {
+  assert.deepEqual(parse(["runs", "--limit", "3"]).input, { limit: 3 });
+  fails(["runs", "--limit", "3.5"], /must be an integer/);
+  fails(["runs", "--limit", "0x10"], /must be an integer/);
+  fails(["records", "9", "--every-seconds", "abc"], /must be an integer/);
+  fails(["download", "9", "--output", ""], /must not be empty/);
+});
+
+test("prototype property names are unknown commands, not crashes", () => {
+  for (const name of ["toString", "constructor", "__proto__", "hasOwnProperty", "valueOf"]) fails([name], /Unknown command/);
 });
 
 test("help and unknown commands", () => {

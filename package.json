@@ -9,15 +9,19 @@
   "scripts": {
     "build": "tsc -b",
     "check": "tsc -b --noEmit false",
-    "test": "node --import tsx --test packages/*/src/*.test.ts",
+    "test": "npm run check:skill && node --import tsx --test packages/*/src/*.test.ts",
     "smoke:mcp": "node scripts/mcp-smoke.mjs",
     "gen:skill": "tsx scripts/gen-skill.ts",
-    "check:skill": "tsx scripts/gen-skill.ts --check"
+    "check:skill": "tsx scripts/gen-skill.ts --check",
+    "audit:deps": "npm audit --omit=dev"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^26.6.5",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

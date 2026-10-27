@@ -1,5 +1,5 @@
 import { parse } from "dotenv";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 // Only the API key is ever taken from a .env file. Copying the whole file into process.env would let a
@@ -15,8 +15,20 @@ export function loadEnv(...dirs: string[]): void {
   for (const dir of dirs) {
     let parsed: Record<string, string>;
     try { parsed = parse(readFileSync(resolve(dir, ".env"))); } catch { continue; } // missing or unreadable
-    for (const name of ALLOWED) if (process.env[name] === undefined && parsed[name]) process.env[name] = parsed[name];
+    for (const name of ALLOWED) {
+      if (process.env[name] !== undefined || !parsed[name]) continue;
+      process.env[name] = parsed[name];
+      warnIfShared(resolve(dir, ".env"));
+    }
   }
+}
+
+// The file holds a credential: say so (on stderr, stdout may carry the MCP protocol) if others can read it.
+function warnIfShared(file: string): void {
+  if (process.platform === "win32") return;
+  try {
+    if (statSync(file).mode & 0o077) console.error(`Warning: ${file} is readable by other users and contains your Garmin key; run: chmod 600 "${file}"`);
+  } catch { /* already read it, so this is only a courtesy */ }
 }
 
 export function requireApiKey(): string {

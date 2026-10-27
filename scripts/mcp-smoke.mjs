@@ -3,7 +3,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const client = new Client({ name: "smoke", version: "0.0.0" });
-await client.connect(new StdioClientTransport({ command: "node", args: ["packages/mcp/dist/index.js"], env: { ...process.env, PATH: process.env.PATH ?? "" } }));
+await client.connect(new StdioClientTransport({ command: process.execPath, args: ["packages/mcp/dist/index.js"],
+  // Pass only what the server needs (the key may come from the repo .env instead); not the whole environment.
+  env: Object.fromEntries(["HOME", "PATH", "GARMIN_PERSONAL_API_KEY"].flatMap((k) => (process.env[k] ? [[k, process.env[k]]] : []))) }));
 const { tools } = await client.listTools();
 console.log("tools:", tools.map((t) => t.name).join(", "));
 const analysis = await client.callTool({ name: "analyse_run", arguments: {} });

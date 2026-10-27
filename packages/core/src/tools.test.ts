@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { GarminError } from "./errors.js";
-import { checkOutputPath, resolveRange, tools, validateInput } from "./tools.js";
+import { inputSchema, commandLine } from "./schema.js";
+import { checkOutputPath, downsample, resolveRange, tools } from "./tools.js";
+
+const tool = (name: string) => tools.find((t) => t.name === name)!;
+const rejects = (name: string, raw: unknown, pattern: RegExp) => assert.throws(() => tool(name).validate(raw), (e) => e instanceof GarminError && pattern.test(e.message));
 
 test("output paths must be relative with no parent traversal", () => {
-  for (const ok of ["run.fit", "out/run.fit", "./run.fit", "a..b.fit"]) assert.equal(checkOutputPath(ok), undefined, ok);
-  for (const bad of ["../x", "a/../../x", "/tmp/x", "a\\..\\x", "x\0y"]) assert.match(checkOutputPath(bad)!, /relative path/, bad);
+  for (const ok of ["run.fit", "out/run.fit", "./run.fit", "a..b.fit"]) assert.equal(checkOutputPath(ok), true, ok);
+  for (const bad of ["../x", "a/../../x", "/tmp/x", "a\\..\\x", "x\0y"]) assert.equal(checkOutputPath(bad), false, bad);
 });
 
 test("write-capable tools are flagged and CLI-only", () => {
@@ -14,21 +18,70 @@ test("write-capable tools are flagged and CLI-only", () => {
   assert.ok(writers.every((t) => !t.surfaces.includes("mcp")));
 });
 
-test("download validates --output through the shared validator", () => {
-  const download = tools.find((t) => t.name === "download_activity")!;
-  assert.throws(() => validateInput(download, { activityId: "1", output: "../x" }), /relative path/);
-  assert.deepEqual(validateInput(download, { activityId: "1", output: "x.fit" }), { activityId: "1", format: "fit", output: "x.fit" });
+test("download validates --output and format", () => {
+  rejects("download_activity", { activityId: "1", output: "../x" }, /relative path/);
+  rejects("download_activity", { activityId: "1", output: "" }, /must not be empty/);
+  rejects("download_activity", { activityId: "1", format: "gpx" }, /must be one of: fit, zip, json/);
+  assert.deepEqual(tool("download_activity").validate({ activityId: "1", output: "x.fit" }), { activityId: "1", format: "fit", output: "x.fit" });
 });
 
-test("date ranges default to the last 7 days and are bounded", () => {
-  const r = resolveRange({ endDate: "2026-10-25" });
-  assert.deepEqual(r, { startDate: "2026-10-19", endDate: "2026-10-25" });
-  assert.deepEqual(resolveRange({ startDate: "2026-10-25", endDate: "2026-10-25" }), { startDate: "2026-10-25", endDate: "2026-10-25" });
-  assert.throws(() => resolveRange({ startDate: "2026-10-26", endDate: "2026-10-25" }), /not be after/);
-  assert.throws(() => resolveRange({ startDate: "2026-01-01", endDate: "2026-10-25" }), GarminError);
+test("calendar-invalid dates are a validation error, not a RangeError", () => {
+  for (const bad of ["2026-13-01", "2026-02-30", "2026-00-10", "2026-04-31", "0050-01-01", "2026-1-1", "tomorrow"]) rejects("list_runs", { date: bad }, /valid date in YYYY-MM-DD/);
+  for (const ok of ["2026-10-25", "2028-02-29"]) assert.deepEqual(tool("list_runs").validate({ date: ok }), { limit: 5, date: ok });
+  rejects("get_sleep", { date: "2026-13-01" }, /valid date/);
 });
 
-test("wellness tools are exposed on both CLI and MCP", () => {
+test("input is strict: no coercion, no unknown keys, no wrong types", () => {
+  rejects("list_runs", { limit: "3" }, /must be an integer/); // MCP sends real numbers; strings are only coerced by the CLI
+  rejects("list_runs", { limit: 3.5 }, /must be an integer/);
+  rejects("list_runs", { limit: 0 }, /between 1 and 100/);
+  rejects("list_runs", { limit: 101 }, /between 1 and 100/);
+  rejects("get_laps", { activityId: "1", extra: 1 }, /Unknown option: extra/);
+  rejects("get_laps", { activityId: 5 }, /positive integer activity ID/);
+  rejects("get_laps", { activityId: "0" }, /positive integer activity ID/);
+  rejects("get_laps", {}, /Missing required activityId/);
+  rejects("get_laps", null, /must be an object/);
+  rejects("get_laps", ["1"], /must be an object/);
+  rejects("get_records", { activityId: "1", everySeconds: 0 }, /between 1 and 3600/);
+});
+
+test("ranges are validated at the schema and bounded", () => {
+  rejects("get_sleep_summaries", { startDate: "2026-10-26", endDate: "2026-10-25" }, /must not be after endDate/);
+  assert.deepEqual(tool("get_sleep_summaries").validate({}), {});
+  assert.deepEqual(resolveRange({ endDate: "2026-10-25" }), { startDate: "2026-10-19", endDate: "2026-10-25" });
+  assert.throws(() => resolveRange({ startDate: "2026-01-01", endDate: "2026-10-25" }), /limited to 90 days/);
+});
+
+test("JSON Schema is derived from the zod input", () => {
+  const runs = inputSchema(tool("list_runs"));
+  assert.equal(runs.additionalProperties, false);
+  assert.equal(runs.properties.limit.type, "integer");
+  assert.deepEqual([runs.properties.limit.minimum, runs.properties.limit.maximum, runs.properties.limit.default], [1, 100, 5]);
+  assert.equal(runs.properties.date.pattern, "^\\d{4}-\\d{2}-\\d{2}$");
+  assert.deepEqual(runs.required ?? [], []); // defaulted and optional fields are not required
+  assert.deepEqual(inputSchema(tool("get_records")).required, ["activityId"]);
+  assert.deepEqual(inputSchema(tool("download_activity")).properties.format.enum, ["fit", "zip", "json"]);
+  assert.equal(inputSchema(tool("get_laps")).$schema, undefined);
+});
+
+test("command lines are generated from the schema", () => {
+  assert.equal(commandLine(tool("get_records")), "garmin records ACTIVITY_ID [--every-seconds N]");
+  assert.equal(commandLine(tool("analyse_run")), "garmin analyse [ACTIVITY_ID]");
+  assert.equal(commandLine(tool("download_activity")), "garmin download ACTIVITY_ID [--format fit|zip|json] [--output OUTPUT]");
+});
+
+test("every tool exposed to models is read-only and validates", () => {
+  for (const t of tools.filter((x) => x.surfaces.includes("mcp"))) assert.ok(!t.writes, t.name);
   const names = tools.filter((t) => t.surfaces.includes("mcp")).map((t) => t.name);
   for (const n of ["get_sleep", "get_sleep_summaries", "get_hrv", "get_hrv_summaries", "get_body_battery", "get_heart_rate", "get_daily_summaries"]) assert.ok(names.includes(n), n);
+});
+
+test("downsampling is by timestamp, not array position", () => {
+  const at = (s: number) => ({ timestamp: new Date(Date.UTC(2026, 9, 25, 8, 0, s)) });
+  // irregular sampling with a pause: 0,1,2, (pause) 60,61,62
+  const records = [0, 1, 2, 60, 61, 62].map(at);
+  assert.deepEqual(downsample(records, 30).map((r) => r.timestamp.getUTCSeconds() + r.timestamp.getUTCMinutes() * 60), [0, 60]);
+  assert.equal(downsample(records, 1).length, 6);
+  // without timestamps it falls back to position
+  assert.equal(downsample([{}, {}, {}, {}, {}], 2).length, 3);
 });

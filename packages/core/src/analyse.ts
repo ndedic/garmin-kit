@@ -3,7 +3,7 @@
 type Num = number | null | undefined;
 export interface Lap { total_distance?: Num; total_timer_time?: Num; avg_heart_rate?: Num; max_heart_rate?: Num; avg_cadence?: Num; avg_power?: Num; total_ascent?: Num }
 export interface RecordSample { timestamp?: Date | string; distance?: Num; heart_rate?: Num }
-export interface RunSummary { activityId: number | string; startTimeLocal?: string; beginTimestamp?: number; distance?: Num; duration?: Num; averageHR?: Num; elevationGain?: Num; activityTrainingLoad?: Num; aerobicTrainingEffect?: Num }
+export interface RunSummary { activityId: number | string; startTimeLocal?: string | null; beginTimestamp?: number | null; distance?: Num; duration?: Num; averageHR?: Num; elevationGain?: Num; activityTrainingLoad?: Num; aerobicTrainingEffect?: Num }
 
 const round = (n: number, digits = 1) => Number(n.toFixed(digits));
 const num = (n: Num): n is number => typeof n === "number" && Number.isFinite(n);
@@ -54,8 +54,8 @@ function halves(records: RecordSample[]) {
 
 export interface RecoveryInputs {
   runDate: string; // YYYY-MM-DD, local
-  runStartLocal?: string; // "YYYY-MM-DD HH:MM:SS"
-  runStartMs?: number; // epoch ms
+  runStartLocal?: string | null; // "YYYY-MM-DD HH:MM:SS"
+  runStartMs?: number | null; // epoch ms
   sleep?: unknown; // sleep summaries for the run date
   hrv?: unknown; // HRV summaries for the run date
   bodyBattery?: unknown; // body battery report for the run date
@@ -102,8 +102,9 @@ export function summariseRecovery(input: RecoveryInputs) {
   }
 
   const battery = pick(arr(input.bodyBattery), "date", input.runDate);
-  if (battery && input.runStartMs !== undefined) {
-    const before = arr(battery.bodyBatteryValuesArray).flatMap((p) => (Array.isArray(p) && num(p[0]) && num(p[1]) && p[0] <= input.runStartMs! ? [[p[0], p[1]] as [number, number]] : []));
+  const startMs = input.runStartMs;
+  if (battery && num(startMs)) {
+    const before = arr(battery.bodyBatteryValuesArray).flatMap((p) => (Array.isArray(p) && num(p[0]) && num(p[1]) && p[0] <= startMs ? [[p[0], p[1]] as [number, number]] : []));
     if (before.length) out.body_battery_at_run_start = before[before.length - 1][1];
   }
   const startKey = input.runStartLocal?.replace(" ", "T").slice(0, 19);
@@ -120,7 +121,7 @@ export function analyse(laps: Lap[], records: RecordSample[], run: RunSummary | 
   const hrLaps = timed.filter((l) => num(l.avg_heart_rate));
   const hrWeight = hrLaps.reduce((a, l) => a + (l.total_timer_time as number), 0);
   const avgHr = hrWeight ? round(hrLaps.reduce((a, l) => a + (l.avg_heart_rate as number) * (l.total_timer_time as number), 0) / hrWeight) : null;
-  const maxHr = Math.max(0, ...laps.map((l) => (num(l.max_heart_rate) ? l.max_heart_rate : 0))) || null;
+  const maxHr = laps.reduce((max, l) => (num(l.max_heart_rate) && l.max_heart_rate > max ? l.max_heart_rate : max), 0) || null; // reduce, not Math.max(...spread): lap count comes from the provider
   const cadenceLaps = timed.filter((l) => num(l.avg_cadence));
   const cadence = cadenceLaps.length ? round((cadenceLaps.reduce((a, l) => a + (l.avg_cadence as number) * (l.total_timer_time as number), 0) / cadenceLaps.reduce((a, l) => a + (l.total_timer_time as number), 0)) * 2) : null;
 

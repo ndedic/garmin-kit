@@ -5,6 +5,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { tools, type Context, type Tool } from "@garmin-kit/core";
 import { MAX_RESULT_CHARS, createServer } from "./server.js";
 
+const writer = { ...tools[0], name: "danger", surfaces: ["mcp"] as const, writes: true } as Tool;
+
 const ctx: Context = { token: async () => { throw new Error("no network in tests"); } };
 
 async function connect(toolset: readonly Tool[] = tools) {
@@ -49,7 +51,7 @@ test("refuses CLI-only and unknown tools", async () => {
 });
 
 test("returns tool output as text and guards oversized results", async () => {
-  const fake = (name: string, out: unknown): Tool => ({ name, cli: name, description: name, params: [], surfaces: ["mcp"], run: async () => out });
+  const fake = (name: string, out: unknown): Tool => ({ ...tools[0], name, cli: name, description: name, surfaces: ["mcp"], validate: () => ({}), run: async () => out });
   const client = await connect([fake("small", { ok: true }), fake("big", "x".repeat(MAX_RESULT_CHARS + 1))]);
   assert.equal(text(await client.callTool({ name: "small", arguments: {} })), '{"ok":true}');
   const big = await client.callTool({ name: "big", arguments: {} });
@@ -61,4 +63,19 @@ test("surfaces runtime failures as tool errors, not protocol errors", async () =
   const result = await (await connect()).callTool({ name: "list_runs", arguments: {} });
   assert.equal(result.isError, true);
   assert.match(text(result), /no network in tests/);
+});
+
+test("a write-capable tool is never exposed, even if mislabelled as MCP", async () => {
+  const client = await connect([...tools, writer]);
+  const { tools: listed } = await client.listTools();
+  assert.ok(!listed.some((t) => t.name === "danger"));
+  assert.equal((await client.callTool({ name: "danger", arguments: {} })).isError, true);
+});
+
+test("error output is bounded and sanitised", async () => {
+  const boom: Tool = { ...tools[0], name: "boom", surfaces: ["mcp"], validate: () => ({}), run: async () => { throw new Error("x\u001b[31m" + "y".repeat(5000)); } };
+  const result = await (await connect([boom])).callTool({ name: "boom", arguments: {} });
+  assert.equal(result.isError, true);
+  assert.ok(text(result).length <= 2000);
+  assert.ok(!text(result).includes("\u001b"));
 });

@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createContext, errorMessage, loadEnv, requireApiKey } from "@garmin-kit/core";
+import { capOutput, createContext, errorMessage, loadEnv, requireApiKey } from "@garmin-kit/core";
 import { parseArgs, usage } from "./args.js";
 
-// Works from any cwd: the repo root .env first, then ./.env. Real env vars still win.
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-loadEnv(repoRoot);
+// Only GARMIN_PERSONAL_API_KEY is read from the repo's own .env (never the current directory's).
+loadEnv(resolve(dirname(fileURLToPath(import.meta.url)), "../../.."));
 
 async function main(): Promise<void> {
-  const parsed = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const unlimited = argv.includes("--no-limit");
+  const parsed = parseArgs(argv.filter((arg) => arg !== "--no-limit"));
   if (parsed.kind === "help") { console.log(usage); return; }
   const result = await parsed.tool.run(parsed.input, createContext(requireApiKey()));
-  console.log(typeof result === "string" ? result : JSON.stringify(result, null, 2));
+  const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+  // The CLI is on the model-facing path too (the skill), so it has the same output cap as the MCP server.
+  console.log(capOutput(text, unlimited));
 }
 
 main().catch((error: unknown) => {

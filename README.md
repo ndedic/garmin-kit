@@ -11,13 +11,13 @@ A read-only CLI for the [Garmin Connect Personal API](https://developer.garmin.c
 ```sh
 git clone https://github.com/ndedic/garmin-kit.git
 cd garmin-kit
-npm install
+npm ci                        # exact, lockfile-pinned versions
 npm run build
 npm link                      # puts `garmin` on your PATH
 cp .env.example .env          # then put your key in .env
 ```
 
-Create the key on Garmin Connect web under **Profile & Account → Settings → Personal API Key**. `.env` is git-ignored, and an existing `GARMIN_PERSONAL_API_KEY` environment variable takes precedence. The CLI and MCP server read **only** `GARMIN_PERSONAL_API_KEY`, and only from the repo's own `.env`; a `.env` in whatever directory you run from is deliberately ignored. Run `chmod 600 .env`.
+Create the key on Garmin Connect web under **Profile & Account → Settings → Personal API Key**. `.env` is git-ignored, and an existing `GARMIN_PERSONAL_API_KEY` environment variable takes precedence. The CLI and MCP server read **only** `GARMIN_PERSONAL_API_KEY`, and only from the repo's own `.env`; a `.env` in whatever directory you run from is deliberately ignored. Run `chmod 600 .env` (a warning is printed if the file is readable by other users).
 
 If `garmin` isn't found after `npm link`, make sure your npm global bin directory is on `PATH` (`npm prefix -g`, then `bin/`).
 
@@ -85,22 +85,21 @@ Troubleshooting:
 
 ## Set up as an MCP server
 
-The same tools are available over MCP (stdio), which also works in Claude Desktop and any other MCP client. Tools exposed: `list_runs`, `analyse_run`, `get_activity`, `get_laps`, `get_records`, plus the wellness tools `get_sleep`, `get_sleep_summaries`, `get_hrv`, `get_hrv_summaries`, `get_body_battery`, `get_heart_rate` and `get_daily_summaries`. All are read-only. `download_activity` is CLI-only because it writes files. Results over 200,000 characters are refused with a hint to narrow the request.
+The same tools are available over MCP (stdio), which also works in Claude Desktop and any other MCP client. Tools exposed: `list_runs`, `analyse_run`, `get_activity`, `get_laps`, `get_records`, plus the wellness tools `get_sleep`, `get_sleep_summaries`, `get_hrv`, `get_hrv_summaries`, `get_body_battery`, `get_heart_rate` and `get_daily_summaries`. All are read-only. `download_activity` is CLI-only because it writes files. Results over 200,000 characters are refused with a hint to narrow the request. The CLI applies the same cap (override with `--no-limit`).
 
 ```sh
 npm run build
 claude mcp add garmin -- node "$PWD/packages/mcp/dist/index.js"
 ```
 
-The server reads `GARMIN_PERSONAL_API_KEY` from the environment the client passes, and falls back to the repo's `.env`. To pass it explicitly add `-e GARMIN_PERSONAL_API_KEY=...`. For Claude Desktop add this to `claude_desktop_config.json`:
+The server reads `GARMIN_PERSONAL_API_KEY` from the environment the client passes, and otherwise from the repo's own `.env` (the setup above already created it, so there is nothing more to configure). Prefer that over putting the key anywhere else: a key passed with `claude mcp add -e KEY=...` lands in your shell history and process list, and a key in `claude_desktop_config.json` sits in plaintext in a file other tools may read. If you must pass it explicitly, keep that file owner-only (`chmod 600`). For Claude Desktop, add this to `claude_desktop_config.json` (no `env` block needed):
 
 ```json
 {
   "mcpServers": {
     "garmin": {
       "command": "node",
-      "args": ["/absolute/path/to/garmin-kit/packages/mcp/dist/index.js"],
-      "env": { "GARMIN_PERSONAL_API_KEY": "your-key-here" }
+      "args": ["/absolute/path/to/garmin-kit/packages/mcp/dist/index.js"]
     }
   }
 }
@@ -140,7 +139,8 @@ To add a tool: write the function, add a definition to `tools`, run `npm run bui
 
 ```sh
 npm run build        # tsc -b across packages
-npm test             # node:test via tsx (includes MCP server tests over an in-memory transport)
+npm test             # skill-drift check + node:test via tsx (includes MCP server tests over an in-memory transport)
+npm run audit:deps   # npm audit for production dependencies
 npm run smoke:mcp    # live stdio check against the real API
 npm run gen:skill    # refresh the skill's tool list
 npm run check:skill  # CI check that it is up to date
@@ -151,7 +151,8 @@ npm run check:skill  # CI check that it is up to date
 - **Token cache.** The 24-hour access token is cached in `~/.config/garmin/connect-personal-api-bearer-token.json` (directory `0700`, file `0600`), the same location and format as Garmin's own [`garmin-personal-api`](https://github.com/garmin/connect-personal-api-python) client, so both share it. It is reused while more than an hour remains, is tied to your key by a SHA-256 fingerprint (the key itself is never stored), and is refreshed automatically after a 401. Delete the file to force a new exchange. Revoking your key on Garmin Connect invalidates it.
 - **Environment.** Only `GARMIN_PERSONAL_API_KEY` is read from a `.env` file, and only from the repo's own. Other variables in it, and any `.env` in the current directory, are ignored.
 - **Network.** The only peer is `https://personal.connectapi.garmin.com`. Redirects are never followed, so the key and token cannot be sent elsewhere.
-- **Files.** `download` is the only command that writes files. It is CLI-only, is not offered by the skill or MCP server, refuses to overwrite, creates files `0600`, and accepts only relative `--output` paths without `..`. Downloaded `activity-*` files are git-ignored.
+- **Inputs and responses.** Every tool input is validated by a [zod](https://zod.dev) schema (strict: unknown options are rejected, no type coercion over MCP), and the Garmin payloads we compute on are validated too, so API changes fail with a clear message. Response bodies are capped at 64 MiB, decompressed FIT files at 100 MiB, and output shown to a model at 200,000 characters. Text from Garmin is stripped of control characters before it is printed.
+- **Files.** `download` is the only command that writes files. It is CLI-only, is not offered by the skill or MCP server, refuses to overwrite, creates files `0600`, and accepts only relative `--output` paths without `..`. Downloaded `activity-*` files are git-ignored. File permissions (`0600`/`0700`) are a POSIX guarantee; on Windows they rely on the permissions of the containing folder.
 
 ## Privacy
 
