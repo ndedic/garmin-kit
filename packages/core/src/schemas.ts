@@ -28,6 +28,14 @@ export const RecordSchema = z.looseObject({
 });
 export const RecordListSchema = z.array(RecordSchema);
 
+// Wellness and detail payloads: only the envelope is checked (the content is passed through to the caller).
+const entries = (key: string) => z.array(z.looseObject({ [key]: z.string().nullish() }));
+export const SleepSummariesSchema = entries("calendarDate").nullable();
+export const HrvSummariesSchema = z.looseObject({ hrvSummaries: entries("calendarDate").nullish() }).nullable();
+export const BodyBatterySchema = entries("date").nullable();
+export const DailySummariesSchema = z.looseObject({ data: entries("calendarDate").nullish() }).nullable();
+export const ObjectSchema = z.looseObject({}).nullable();
+
 /** Validate a Garmin response; a mismatch becomes a clear error instead of NaN or a crash further on. */
 export function parseResponse<T extends z.ZodType>(schema: T, data: unknown, what: string): z.output<T> {
   const result = schema.safeParse(data);

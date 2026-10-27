@@ -5,7 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { tools, type Context, type Tool } from "@garmin-kit/core";
 import { MAX_RESULT_CHARS, createServer } from "./server.js";
 
-const writer = { ...tools[0], name: "danger", surfaces: ["mcp"] as const, writes: true } as Tool;
+const writer = { ...tools[0], name: "danger", surfaces: ["mcp"] as const, access: "write" } as Tool;
 
 const ctx: Context = { token: async () => { throw new Error("no network in tests"); } };
 
@@ -78,4 +78,24 @@ test("error output is bounded and sanitised", async () => {
   assert.equal(result.isError, true);
   assert.ok(text(result).length <= 2000);
   assert.ok(!text(result).includes("\u001b"));
+});
+
+test("a tool must declare read access to be exposed", async () => {
+  const sneaky = { ...tools[0], name: "sneaky", surfaces: ["mcp"] as const, access: undefined } as unknown as Tool;
+  const { tools: listed } = await (await connect([sneaky])).listTools();
+  assert.equal(listed.length, 0);
+});
+
+test("unknown tool names are sanitised and bounded in the error", async () => {
+  const result = await (await connect()).callTool({ name: "bad\u001b[2Jname" + "z".repeat(500), arguments: {} });
+  assert.equal(result.isError, true);
+  assert.ok(!text(result).includes("\u001b"));
+  assert.ok(text(result).length < 200);
+});
+
+test("control characters in provider data are escaped in successful output", async () => {
+  const echo: Tool = { ...tools[0], name: "echo", surfaces: ["mcp"], access: "read", validate: () => ({}), run: async () => ({ note: "a\u009b31mb\u007fc\u2028d" }) };
+  const out = text(await (await connect([echo])).callTool({ name: "echo", arguments: {} }));
+  assert.ok(!/[\u007f-\u009f\u2028\u2029]/.test(out), "no raw DEL/C1/line separators");
+  assert.equal(JSON.parse(out).note, "a\u009b31mb\u007fc\u2028d", "the data itself is unchanged");
 });

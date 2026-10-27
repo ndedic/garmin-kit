@@ -1,14 +1,14 @@
 // Tool registry: the single source of truth. The CLI, the MCP server and the skill docs are all generated
 // from these definitions. Each tool's input is a zod schema; the JSON Schema (MCP), the CLI flags/help and
 // the validation all derive from it, and the schema is the only place the rules live.
-import { access, writeFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { access, realpath, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import { analyse, summariseRecovery, type Lap, type RecordSample, type RunSummary } from "./analyse.js";
 import { apiActivityZip, apiJson, type Context } from "./auth.js";
 import { activityPath, bodyBatteryPath, dailySummariesPath, extractFit, heartRatePath, hrvPath, hrvSummariesPath, parseFit, runsPath, sleepPath, sleepSummariesPath } from "./client.js";
 import { GarminError, errorMessage } from "./errors.js";
-import { LapListSchema, RecordListSchema, RunListSchema, parseResponse } from "./schemas.js";
+import { BodyBatterySchema, DailySummariesSchema, HrvSummariesSchema, LapListSchema, ObjectSchema, RecordListSchema, RunListSchema, SleepSummariesSchema, parseResponse } from "./schemas.js";
 
 export type Surface = "cli" | "mcp";
 
@@ -20,7 +20,7 @@ export interface Tool {
   input: z.ZodObject;
   positional: readonly string[]; // CLI: input keys taken as bare arguments, in order
   surfaces: readonly Surface[];
-  writes?: boolean; // creates local files; never advertised to models via the skill
+  access: "read" | "write"; // only "read" tools are exposed over MCP or listed in the skill; "write" creates local files
   /** Validate untrusted input (argv or MCP arguments) and return the parsed value; throws GarminError. */
   validate(raw: unknown): unknown;
   /** Run with input that came from `validate`. */
@@ -35,7 +35,7 @@ interface ToolDef<S extends z.ZodObject> {
   input: S;
   positional?: readonly (keyof z.input<S> & string)[];
   surfaces: readonly Surface[];
-  writes?: boolean;
+  access: "read" | "write";
   run(input: z.output<S>, ctx: Context): Promise<unknown>;
 }
 
@@ -82,8 +82,13 @@ const activity = ActivityIdSchema.describe("Garmin activity ID (from list_runs)"
 const integer = (min: number, max: number) =>
   z.number({ error: "must be an integer" }).int("must be an integer").min(min, `must be between ${min} and ${max}`).max(max, `must be between ${min} and ${max}`);
 
-// Destination policy for files we create: relative to the current directory, no parent traversal.
-export const checkOutputPath = (value: string): boolean => !(isAbsolute(value) || value.split(/[\\/]+/).includes("..") || value.includes("\0"));
+// Destination policy for files we create: a plain relative path inside the current directory. Lexical checks
+// here; downloadActivity additionally resolves symlinks. Reserved/drive names are rejected on every platform.
+const OUTPUT_MESSAGE = "must be a relative path inside the current directory (no absolute paths, .., drive letters or reserved names)";
+const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+export const checkOutputPath = (value: string): boolean =>
+  !(isAbsolute(value) || /^[a-zA-Z]:/.test(value) || value.includes("\0") || (process.platform === "win32" && value.includes(":"))
+    || value.split(/[\\/]+/).some((part) => part === ".." || RESERVED_NAME.test(part)));
 
 const dayInput = z.strictObject({
   date: dateField("Calendar date YYYY-MM-DD; defaults to today (sleep belongs to the date you woke up)").optional(),
@@ -98,7 +103,7 @@ const rangeInput = z.strictObject({
 export const listRuns = async (ctx: Context, opts: { limit?: number; date?: string } = {}) =>
   parseResponse(RunListSchema, await apiJson(ctx, runsPath(opts.limit ?? 5, opts.date)), "run list");
 
-export const getActivity = async (ctx: Context, id: string) => apiJson(ctx, activityPath(id));
+export const getActivity = async (ctx: Context, id: string) => parseResponse(ObjectSchema, await apiJson(ctx, activityPath(id)), "activity");
 
 const fitFor = async (ctx: Context, id: string) => parseFit(extractFit(await apiActivityZip(ctx, id)));
 
@@ -121,8 +126,17 @@ export async function getRecords(ctx: Context, id: string, everySeconds = 1): Pr
 export async function downloadActivity(ctx: Context, opts: { id: string; format?: "fit" | "zip" | "json"; output?: string }): Promise<string> {
   const format = opts.format ?? "fit";
   const output = opts.output ?? `activity-${opts.id}.${format}`;
+  // The policy lives here (not only in the tool schema) so no direct caller can bypass it.
+  if (!checkOutputPath(output)) throw new GarminError(`output ${OUTPUT_MESSAGE}.`);
+  const target = resolve(output);
+  const [root, parent] = await Promise.all([
+    realpath(process.cwd()),
+    realpath(dirname(target)).catch(() => { throw new GarminError(`The directory for ${output} does not exist.`); }),
+  ]);
+  if (parent !== root && !parent.startsWith(root + sep)) throw new GarminError(`output resolves outside the current directory (through a symlink?): ${output}`);
+  const destination = join(parent, basename(target)); // write through the resolved directory, not the symlinked path
   // Fail before the network round trip; the exclusive create below stays the authoritative check.
-  if (await access(output).then(() => true, () => false)) throw new GarminError(`${output} already exists; refusing to overwrite it.`);
+  if (await access(destination).then(() => true, () => false)) throw new GarminError(`${output} already exists; refusing to overwrite it.`);
   const zip = await apiActivityZip(ctx, opts.id);
   let content: Buffer;
   if (format === "zip") content = zip;
@@ -131,7 +145,7 @@ export async function downloadActivity(ctx: Context, opts: { id: string; format?
     content = format === "fit" ? fit : Buffer.from(JSON.stringify(await parseFit(fit, true), null, 2) + "\n");
   }
   try {
-    await writeFile(output, content, { flag: "wx", mode: 0o600 });
+    await writeFile(destination, content, { flag: "wx", mode: 0o600 });
   } catch (error) {
     throw new GarminError(`Could not save ${format.toUpperCase()} file: ${errorMessage(error)}`);
   }
@@ -140,7 +154,8 @@ export async function downloadActivity(ctx: Context, opts: { id: string; format?
 
 // --- Wellness primitives (read-only daily health data). ---
 
-const localDate = (d: Date) => d.toLocaleDateString("en-CA"); // YYYY-MM-DD in local time
+const pad = (n: number) => String(n).padStart(2, "0");
+const localDate = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; // YYYY-MM-DD in local time, locale-independent
 const shift = (iso: string, days: number) => { const d = new Date(`${iso}T12:00:00`); d.setDate(d.getDate() + days); return localDate(d); };
 const MAX_RANGE_DAYS = 90;
 
@@ -155,15 +170,18 @@ export function resolveRange(range: DateRange = {}): { startDate: string; endDat
 }
 const today = (date?: string) => date ?? localDate(new Date());
 
-export const getSleep = (ctx: Context, date?: string) => apiJson(ctx, sleepPath(today(date)));
-export const getSleepSummaries = (ctx: Context, range?: DateRange) => { const r = resolveRange(range); return apiJson(ctx, sleepSummariesPath(r.startDate, r.endDate)); };
-export const getHrv = (ctx: Context, date?: string) => apiJson(ctx, hrvPath(today(date)));
-export const getHrvSummaries = (ctx: Context, range?: DateRange) => { const r = resolveRange(range); return apiJson(ctx, hrvSummariesPath(r.startDate, r.endDate)); };
-export const getBodyBattery = (ctx: Context, range?: DateRange) => { const r = resolveRange(range); return apiJson(ctx, bodyBatteryPath(r.startDate, r.endDate)); };
-export const getHeartRate = (ctx: Context, date?: string) => apiJson(ctx, heartRatePath(today(date)));
-export const getDailySummaries = (ctx: Context, range?: DateRange) => { const r = resolveRange(range); return apiJson(ctx, dailySummariesPath(r.startDate, r.endDate)); };
+export const getSleep = async (ctx: Context, date?: string) => parseResponse(ObjectSchema, await apiJson(ctx, sleepPath(today(date))), "sleep");
+export const getSleepSummaries = async (ctx: Context, range?: DateRange) => { const r = resolveRange(range); return parseResponse(SleepSummariesSchema, await apiJson(ctx, sleepSummariesPath(r.startDate, r.endDate)), "sleep summaries"); };
+export const getHrv = async (ctx: Context, date?: string) => parseResponse(ObjectSchema, await apiJson(ctx, hrvPath(today(date))), "HRV");
+export const getHrvSummaries = async (ctx: Context, range?: DateRange) => { const r = resolveRange(range); return parseResponse(HrvSummariesSchema, await apiJson(ctx, hrvSummariesPath(r.startDate, r.endDate)), "HRV summaries"); };
+export const getBodyBattery = async (ctx: Context, range?: DateRange) => { const r = resolveRange(range); return parseResponse(BodyBatterySchema, await apiJson(ctx, bodyBatteryPath(r.startDate, r.endDate)), "Body Battery"); };
+export const getHeartRate = async (ctx: Context, date?: string) => parseResponse(ObjectSchema, await apiJson(ctx, heartRatePath(today(date))), "heart rate");
+export const getDailySummaries = async (ctx: Context, range?: DateRange) => { const r = resolveRange(range); return parseResponse(DailySummariesSchema, await apiJson(ctx, dailySummariesPath(r.startDate, r.endDate)), "daily summaries"); };
 
 // --- Composition: built only from the primitives above plus the pure `analyse` function. ---
+
+/** The (up to) 3 runs before `runs[index]`; none if the run is outside the fetched window (newest-first list). */
+export const previousRuns = <T>(runs: readonly T[], index: number): T[] => (index >= 0 ? runs.slice(index + 1, index + 4) : []);
 
 export async function analyseRun(ctx: Context, id?: string) {
   const runs = await listRuns(ctx, { limit: 100 });
@@ -172,7 +190,9 @@ export async function analyseRun(ctx: Context, id?: string) {
   // The id from Garmin's list is re-validated before it selects a resource, same as one typed by the caller.
   const activityId = ActivityIdSchema.safeParse(id ?? (target ? String(target.activityId) : undefined));
   if (!activityId.success) throw new GarminError(id ? `activityId ${ID_MESSAGE}` : "No running activities found.");
-  const previous = runs.filter((_, i) => i !== index && (index < 0 || i > index)).slice(0, 3);
+  // Garmin lists newest first, so earlier runs follow the target. If the run is not in the window we fetched we cannot
+  // tell which runs are earlier, so we compare against nothing rather than against possibly later runs.
+  const previous = previousRuns(runs, index);
   const [{ laps }, { records }, recovery] = await Promise.all([getLaps(ctx, activityId.data), getRecords(ctx, activityId.data), recoveryFor(ctx, target)]);
   return analyse(
     parseResponse(LapListSchema, laps, "laps") as Lap[],
@@ -186,7 +206,7 @@ export async function analyseRun(ctx: Context, id?: string) {
 // Wellness is context, not the point: if any endpoint fails or has no data, analyse still works.
 async function recoveryFor(ctx: Context, run: RunSummary | undefined) {
   const runDate = run?.startTimeLocal?.slice(0, 10);
-  if (!run || !runDate) return null;
+  if (!run || !runDate || !/^\d{4}-\d{2}-\d{2}$/.test(runDate) || !validCalendarDate(runDate)) return null; // provider-supplied: validate before it reaches a URL
   const day = { startDate: runDate, endDate: runDate };
   const [sleep, hrv, bodyBattery, daily] = await Promise.allSettled([
     getSleepSummaries(ctx, day), getHrvSummaries(ctx, day), getBodyBattery(ctx, day),
@@ -200,7 +220,7 @@ async function recoveryFor(ctx: Context, run: RunSummary | undefined) {
 
 export const tools: readonly Tool[] = [
   defineTool({
-    name: "list_runs", cli: "runs", surfaces: ["cli", "mcp"],
+    name: "list_runs", cli: "runs", surfaces: ["cli", "mcp"], access: "read",
     description: "List recent running activities (raw Garmin summaries, newest first). Use to find activity IDs.",
     input: z.strictObject({
       limit: integer(1, 100).default(5).describe("How many runs to return"),
@@ -209,78 +229,78 @@ export const tools: readonly Tool[] = [
     run: (input, ctx) => listRuns(ctx, input),
   }),
   defineTool({
-    name: "analyse_run", cli: "analyse", aliases: ["analyze"], surfaces: ["cli", "mcp"], positional: ["activityId"],
+    name: "analyse_run", cli: "analyse", aliases: ["analyze"], surfaces: ["cli", "mcp"], access: "read", positional: ["activityId"],
     description: "Compact summary of a run: totals, per-km splits, first/second-half pace and HR, HR drift, pacing label, comparison with the previous 3 runs, and recovery context (sleep, HRV, resting HR, Body Battery going into the run). Defaults to the latest run. Contains no name or GPS data. Best starting point for any question about a run.",
     input: z.strictObject({ activityId: ActivityIdSchema.describe("Garmin activity ID; omit for the latest run").optional() }),
     run: (input, ctx) => analyseRun(ctx, input.activityId),
   }),
   defineTool({
-    name: "get_activity", cli: "activity", surfaces: ["cli", "mcp"], positional: ["activityId"],
+    name: "get_activity", cli: "activity", surfaces: ["cli", "mcp"], access: "read", positional: ["activityId"],
     description: "Raw Garmin activity detail JSON. Verbose and includes location data; prefer analyse_run.",
     input: z.strictObject({ activityId: activity }),
     run: (input, ctx) => getActivity(ctx, input.activityId),
   }),
   defineTool({
-    name: "get_laps", cli: "laps", surfaces: ["cli", "mcp"], positional: ["activityId"],
+    name: "get_laps", cli: "laps", surfaces: ["cli", "mcp"], access: "read", positional: ["activityId"],
     description: "Parsed FIT lap messages for an activity (raw, verbose). Prefer analyse_run for splits.",
     input: z.strictObject({ activityId: activity }),
     run: (input, ctx) => getLaps(ctx, input.activityId),
   }),
   defineTool({
-    name: "get_records", cli: "records", surfaces: ["cli", "mcp"], positional: ["activityId"],
+    name: "get_records", cli: "records", surfaces: ["cli", "mcp"], access: "read", positional: ["activityId"],
     description: "Per-second FIT samples (HR, speed, altitude, GPS) for an activity. Very large; downsample with everySeconds.",
     input: z.strictObject({ activityId: activity, everySeconds: integer(1, 3600).default(1).describe("Keep one sample per N seconds") }),
     run: (input, ctx) => getRecords(ctx, input.activityId, input.everySeconds),
   }),
   defineTool({
-    name: "get_sleep", cli: "sleep", surfaces: ["cli", "mcp"],
+    name: "get_sleep", cli: "sleep", surfaces: ["cli", "mcp"], access: "read",
     description: "Detailed sleep for one night: duration, stages, sleep score, overnight HR/HRV/respiration. Large; use get_sleep_summaries for trends.",
     input: dayInput,
     run: (input, ctx) => getSleep(ctx, input.date),
   }),
   defineTool({
-    name: "get_sleep_summaries", cli: "sleep-summaries", surfaces: ["cli", "mcp"],
+    name: "get_sleep_summaries", cli: "sleep-summaries", surfaces: ["cli", "mcp"], access: "read",
     description: "Per-night sleep summaries over a date range (default last 7 days, max 90).",
     input: rangeInput,
     run: (input, ctx) => getSleepSummaries(ctx, input),
   }),
   defineTool({
-    name: "get_hrv", cli: "hrv", surfaces: ["cli", "mcp"],
+    name: "get_hrv", cli: "hrv", surfaces: ["cli", "mcp"], access: "read",
     description: "Overnight heart rate variability for one date: summary, status and readings.",
     input: dayInput,
     run: (input, ctx) => getHrv(ctx, input.date),
   }),
   defineTool({
-    name: "get_hrv_summaries", cli: "hrv-summaries", surfaces: ["cli", "mcp"],
+    name: "get_hrv_summaries", cli: "hrv-summaries", surfaces: ["cli", "mcp"], access: "read",
     description: "Daily HRV summaries over a date range (default last 7 days, max 90). Good for recovery trends.",
     input: rangeInput,
     run: (input, ctx) => getHrvSummaries(ctx, input),
   }),
   defineTool({
-    name: "get_body_battery", cli: "body-battery", surfaces: ["cli", "mcp"],
+    name: "get_body_battery", cli: "body-battery", surfaces: ["cli", "mcp"], access: "read",
     description: "Body Battery energy levels over a date range (default last 7 days, max 90).",
     input: rangeInput,
     run: (input, ctx) => getBodyBattery(ctx, input),
   }),
   defineTool({
-    name: "get_heart_rate", cli: "heart-rate", surfaces: ["cli", "mcp"],
+    name: "get_heart_rate", cli: "heart-rate", surfaces: ["cli", "mcp"], access: "read",
     description: "All-day heart rate for one date, including resting heart rate.",
     input: dayInput,
     run: (input, ctx) => getHeartRate(ctx, input.date),
   }),
   defineTool({
-    name: "get_daily_summaries", cli: "daily-summaries", surfaces: ["cli", "mcp"],
+    name: "get_daily_summaries", cli: "daily-summaries", surfaces: ["cli", "mcp"], access: "read",
     description: "Daily wellness summaries over a date range (default last 7 days, max 90): steps, resting HR, stress and more.",
     input: rangeInput,
     run: (input, ctx) => getDailySummaries(ctx, input),
   }),
   defineTool({
-    name: "download_activity", cli: "download", surfaces: ["cli"], writes: true, positional: ["activityId"], // writes files: CLI only, user-invoked
+    name: "download_activity", cli: "download", surfaces: ["cli"], access: "write", positional: ["activityId"], // writes files: CLI only, user-invoked
     description: "Save an activity's FIT file (or Garmin's ZIP, or FIT parsed to JSON) to disk. Refuses to overwrite.",
     input: z.strictObject({
       activityId: activity,
       format: z.enum(["fit", "zip", "json"], { error: "must be one of: fit, zip, json" }).default("fit").describe("fit (unchanged), zip (Garmin's original), json (parsed FIT)"),
-      output: z.string().min(1, "must not be empty").refine(checkOutputPath, "must be a relative path inside the current directory (no absolute paths or ..)").optional().describe("Destination file, relative to the current directory; default activity-ID.FORMAT"),
+      output: z.string().min(1, "must not be empty").refine(checkOutputPath, OUTPUT_MESSAGE).optional().describe("Destination file, relative to the current directory; default activity-ID.FORMAT"),
     }),
     run: (input, ctx) => downloadActivity(ctx, { id: input.activityId, format: input.format, output: input.output }),
   }),

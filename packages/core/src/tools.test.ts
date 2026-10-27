@@ -2,20 +2,21 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { GarminError } from "./errors.js";
 import { inputSchema, commandLine } from "./schema.js";
-import { checkOutputPath, downsample, resolveRange, tools } from "./tools.js";
+import { checkOutputPath, downsample, previousRuns, resolveRange, tools } from "./tools.js";
 
 const tool = (name: string) => tools.find((t) => t.name === name)!;
 const rejects = (name: string, raw: unknown, pattern: RegExp) => assert.throws(() => tool(name).validate(raw), (e) => e instanceof GarminError && pattern.test(e.message));
 
 test("output paths must be relative with no parent traversal", () => {
   for (const ok of ["run.fit", "out/run.fit", "./run.fit", "a..b.fit"]) assert.equal(checkOutputPath(ok), true, ok);
-  for (const bad of ["../x", "a/../../x", "/tmp/x", "a\\..\\x", "x\0y"]) assert.equal(checkOutputPath(bad), false, bad);
+  for (const bad of ["../x", "a/../../x", "/tmp/x", "a\\..\\x", "x\0y", "C:file.fit", "c:\\x", "con", "NUL.fit", "dir/aux.txt", "com1", "LPT9.fit"]) assert.equal(checkOutputPath(bad), false, bad);
 });
 
-test("write-capable tools are flagged and CLI-only", () => {
-  const writers = tools.filter((t) => t.writes);
+test("only read-only tools can reach MCP or the skill; the single writer is CLI-only", () => {
+  const writers = tools.filter((t) => t.access === "write");
   assert.deepEqual(writers.map((t) => t.name), ["download_activity"]);
   assert.ok(writers.every((t) => !t.surfaces.includes("mcp")));
+  assert.ok(tools.every((t) => t.access === "read" || t.access === "write"), "every tool must declare its access");
 });
 
 test("download validates --output and format", () => {
@@ -71,7 +72,7 @@ test("command lines are generated from the schema", () => {
 });
 
 test("every tool exposed to models is read-only and validates", () => {
-  for (const t of tools.filter((x) => x.surfaces.includes("mcp"))) assert.ok(!t.writes, t.name);
+  for (const t of tools.filter((x) => x.surfaces.includes("mcp"))) assert.equal(t.access, "read", t.name);
   const names = tools.filter((t) => t.surfaces.includes("mcp")).map((t) => t.name);
   for (const n of ["get_sleep", "get_sleep_summaries", "get_hrv", "get_hrv_summaries", "get_body_battery", "get_heart_rate", "get_daily_summaries"]) assert.ok(names.includes(n), n);
 });
@@ -84,4 +85,12 @@ test("downsampling is by timestamp, not array position", () => {
   assert.equal(downsample(records, 1).length, 6);
   // without timestamps it falls back to position
   assert.equal(downsample([{}, {}, {}, {}, {}], 2).length, 3);
+});
+
+test("the previous-runs comparison only ever uses earlier runs", () => {
+  const runs = ["newest", "r2", "r3", "r4", "r5"]; // newest first
+  assert.deepEqual(previousRuns(runs, 0), ["r2", "r3", "r4"]);
+  assert.deepEqual(previousRuns(runs, 3), ["r5"]);
+  assert.deepEqual(previousRuns(runs, 4), []);
+  assert.deepEqual(previousRuns(runs, -1), [], "a run outside the fetched window has no known earlier runs");
 });

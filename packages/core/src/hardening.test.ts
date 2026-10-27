@@ -49,7 +49,7 @@ test("a decompression bomb is refused before inflating", () => {
 
 test("CLI output is capped unless --no-limit", () => {
   const big = "x".repeat(MAX_RESULT_CHARS + 1);
-  assert.throws(() => capOutput(big), /--no-limit/);
+  assert.throws(() => capOutput(big), (e) => e instanceof GarminError && /limit 200000/.test(e.message) && !/--no-limit/.test(e.message));
   assert.equal(capOutput(big, true), big);
   assert.equal(capOutput("small"), "small");
 });

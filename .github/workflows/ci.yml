@@ -5,21 +5,26 @@ on:
   pull_request:
 permissions:
   contents: read # read-only: CI has no publish or write authority
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         node: [20, 22]
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to commit SHAs (the comment is the tag they were resolved from).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts # no dependency install scripts run in CI
       - run: npm run build
       - run: npm test # includes the generated-skill drift check
       - run: npm run audit:deps

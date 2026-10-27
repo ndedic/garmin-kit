@@ -66,7 +66,8 @@ type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj | undefined => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : undefined);
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const val = (v: unknown): number | undefined => (num(v as Num) ? (v as number) : undefined);
-const pick = (items: unknown[], key: string, date: string): Obj | undefined => obj(items.find((i) => obj(i)?.[key] === date)) ?? obj(items[items.length - 1]);
+// Exact date match only: when Garmin has nothing for the run date we report nothing, never another day's data.
+const pick = (items: unknown[], key: string, date: string): Obj | undefined => obj(items.find((i) => obj(i)?.[key] === date));
 
 export function summariseRecovery(input: RecoveryInputs) {
   const out: Record<string, unknown> = {};
@@ -95,7 +96,7 @@ export function summariseRecovery(input: RecoveryInputs) {
   const days = arr(obj(input.daily)?.data).map(obj).filter((d): d is Obj => !!d);
   const resting = (d: Obj) => val(obj(d.heartRate)?.restingValue);
   const today = days.find((d) => d.calendarDate === input.runDate);
-  const previousResting = days.filter((d) => d.calendarDate !== input.runDate).flatMap((d) => (resting(d) !== undefined ? [resting(d) as number] : []));
+  const previousResting = days.filter((d) => typeof d.calendarDate === "string" && d.calendarDate < input.runDate).flatMap((d) => (resting(d) !== undefined ? [resting(d) as number] : []));
   if (today && resting(today) !== undefined) {
     out.resting_hr_bpm = resting(today);
     if (previousResting.length >= 3) out.resting_hr_vs_prev_week_bpm = round((resting(today) as number) - previousResting.reduce((a, b) => a + b, 0) / previousResting.length);

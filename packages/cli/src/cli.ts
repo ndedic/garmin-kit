@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { capOutput, createContext, errorMessage, loadEnv, requireApiKey } from "@garmin-kit/core";
+import { capOutput, createContext, errorMessage, loadEnv, requireApiKey, serialize } from "@garmin-kit/core";
 import { parseArgs, usage } from "./args.js";
 
 // Only GARMIN_PERSONAL_API_KEY is read from the repo's own .env (never the current directory's).
@@ -13,7 +13,7 @@ async function main(): Promise<void> {
   const parsed = parseArgs(argv.filter((arg) => arg !== "--no-limit"));
   if (parsed.kind === "help") { console.log(usage); return; }
   const result = await parsed.tool.run(parsed.input, createContext(requireApiKey()));
-  const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+  const text = serialize(result, true); // control characters from provider data are neutralised
   // The CLI is on the model-facing path too (the skill), so it has the same output cap as the MCP server.
   console.log(capOutput(text, unlimited));
 }

@@ -1,7 +1,7 @@
 import AdmZip from "adm-zip";
 import FitParser from "fit-file-parser";
 import { GarminError, errorMessage } from "./errors.js";
-import { MAX_FIT_BYTES, MAX_RESPONSE_BYTES } from "./limits.js";
+import { MAX_FIT_BYTES, MAX_RESPONSE_BYTES, MAX_ZIP_ENTRIES } from "./limits.js";
 
 export const base = "https://personal.connectapi.garmin.com";
 const MAX_ATTEMPTS = 3;
@@ -32,12 +32,21 @@ async function readBody(response: Response): Promise<Buffer> {
 
 const retryable = (status: number) => status === 429 || status >= 500;
 
+// Credentials only ever go to the fixed origin: a path that could change the host is a bug, so refuse it.
+function urlFor(path: string): string {
+  const url = new URL(path, base);
+  if (!path.startsWith("/") || path.startsWith("//") || url.origin !== new URL(base).origin) throw new GarminError("Internal error: API path must be an absolute path on the Garmin origin.");
+  return url.toString();
+}
+
 export async function request(path: string, init: RequestInit): Promise<Buffer> {
+  const url = urlFor(path);
   for (let attempt = 1; ; attempt++) {
     const last = attempt === MAX_ATTEMPTS;
     try {
-      const response = await fetch(`${base}${path}`, { ...init, redirect: "error", signal: AbortSignal.timeout(30_000) }) // never follow a redirect: the key/token go only to the fixed Garmin origin;
+      const response = await fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(30_000) }) // never follow a redirect: the key/token go only to the fixed Garmin origin;
       if (response.ok) return await readBody(response);
+      await response.body?.cancel().catch(() => undefined); // not consumed otherwise
       if (!last && retryable(response.status)) { await sleep(500 * 2 ** (attempt - 1)); continue; }
       const hint = HTTP_HINTS[response.status];
       throw new GarminError(`Garmin returned HTTP ${response.status}${hint ? `: ${hint}` : ""}`, response.status);
@@ -78,7 +87,15 @@ export const dailySummariesPath = (startDate: string, endDate: string) => `/user
 
 export const activityPath = (id: string): string => `/activity-service/activity/${id}`;
 
+// Entry count from the end-of-central-directory record, read without parsing (or allocating for) the entries.
+function zipEntryCount(archive: Buffer): number {
+  const floor = Math.max(0, archive.length - 22 - 0xffff);
+  for (let i = archive.length - 22; i >= floor; i--) if (archive.readUInt32LE(i) === 0x06054b50) return archive.readUInt16LE(i + 10);
+  throw new GarminError("Garmin's export is not a valid ZIP archive.");
+}
+
 export function extractFit(archive: Buffer): Buffer {
+  if (zipEntryCount(archive) > MAX_ZIP_ENTRIES) throw new GarminError(`Garmin's ZIP has more than ${MAX_ZIP_ENTRIES} entries; refusing to parse it.`);
   const entries = new AdmZip(archive).getEntries().filter((entry) => !entry.isDirectory && entry.entryName.toLowerCase().endsWith(".fit"));
   if (entries.length !== 1) throw new GarminError(`Expected one FIT file in Garmin's ZIP; found ${entries.length}.`);
   if (entries[0].header.size > MAX_FIT_BYTES) throw new GarminError(`FIT file in Garmin's ZIP is larger than ${MAX_FIT_BYTES / 1024 / 1024} MiB; refusing to decompress it.`);

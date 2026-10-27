@@ -40,3 +40,26 @@ test("missing or malformed data degrades to partial output, never throws", () =>
   const partial = summariseRecovery({ ...run, sleep: fixture.sleep })!;
   assert.deepEqual(Object.keys(partial).sort(), ["awake_min", "deep_min", "rem_min", "sleep_hours", "sleep_score", "sleep_score_label"]);
 });
+
+test("data from another day is never attributed to the run", () => {
+  const otherDay = {
+    ...run,
+    sleep: [{ calendarDate: "2026-10-20", sleepTimeSeconds: 18000, sleepScores: { overall: { value: 40, qualifierKey: "POOR" } } }],
+    hrv: { hrvSummaries: [{ calendarDate: "2026-10-24", lastNightAvg: 99 }] },
+    bodyBattery: [{ date: "2026-10-26", bodyBatteryValuesArray: [[1792881540000, 30]] }],
+  };
+  assert.equal(summariseRecovery(otherDay), null);
+});
+
+test("resting HR is compared only with the days before the run", () => {
+  const r = summariseRecovery({
+    ...run,
+    daily: { data: [
+      { calendarDate: "2026-10-24", heartRate: { restingValue: 70 } }, { calendarDate: "2026-10-23", heartRate: { restingValue: 70 } },
+      { calendarDate: "2026-10-22", heartRate: { restingValue: 70 } },
+      { calendarDate: "2026-10-26", heartRate: { restingValue: 200 } }, // a later day must not leak into "previous week"
+      { calendarDate: "2026-10-25", heartRate: { restingValue: 60 } },
+    ] },
+  })!;
+  assert.equal(r.resting_hr_vs_prev_week_bpm, -10);
+});

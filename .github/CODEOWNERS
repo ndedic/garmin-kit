@@ -1,0 +1,7 @@
+# Changes to CI, the skill (which instructs a model) and the credential-handling code need an owner's review
+# once branch protection with "Require review from Code Owners" is enabled in the repository settings.
+*                         @ndedic
+/.github/                 @ndedic
+/skills/                  @ndedic
+/packages/core/src/auth.ts @ndedic
+/packages/core/src/env.ts  @ndedic
