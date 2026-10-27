@@ -1,0 +1,9 @@
+{
+  "name": "@garmin-kit/cli",
+  "version": "1.0.0",
+  "description": "Read-only Garmin Personal API command line",
+  "private": true,
+  "type": "module",
+  "bin": { "garmin": "./dist/cli.js" },
+  "dependencies": { "@garmin-kit/core": "*" }
+}

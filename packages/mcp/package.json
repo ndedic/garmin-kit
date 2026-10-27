@@ -1,0 +1,9 @@
+{
+  "name": "@garmin-kit/mcp",
+  "version": "1.0.0",
+  "description": "MCP server exposing the garmin-kit tool registry",
+  "private": true,
+  "type": "module",
+  "bin": { "garmin-kit-mcp": "./dist/index.js" },
+  "dependencies": { "@garmin-kit/core": "*", "@modelcontextprotocol/sdk": "^1.32.2" }
+}

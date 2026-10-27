@@ -1,0 +1,23 @@
+{
+  "name": "garmin-kit",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b --noEmit false",
+    "test": "node --import tsx --test packages/*/src/*.test.ts",
+    "smoke:mcp": "node scripts/mcp-smoke.mjs",
+    "gen:skill": "tsx scripts/gen-skill.ts",
+    "check:skill": "tsx scripts/gen-skill.ts --check"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
