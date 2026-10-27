@@ -8,6 +8,8 @@ import { analyse, summariseRecovery, type Lap, type RecordSample, type RunSummar
 import { apiActivityZip, apiJson, type Context } from "./auth.js";
 import { activityPath, bodyBatteryPath, dailySummariesPath, extractFit, heartRatePath, hrvPath, hrvSummariesPath, parseFit, runsPath, sleepPath, sleepSummariesPath } from "./client.js";
 import { GarminError, errorMessage } from "./errors.js";
+import { MAX_RESULT_CHARS } from "./limits.js";
+import { serialize } from "./output.js";
 import { BodyBatterySchema, DailySummariesSchema, HrvSummariesSchema, LapListSchema, ObjectSchema, RecordListSchema, RunListSchema, SleepSummariesSchema, parseResponse } from "./schemas.js";
 
 export type Surface = "cli" | "mcp";
@@ -121,6 +123,27 @@ export function downsample<T extends { timestamp?: unknown }>(records: T[], ever
 export async function getRecords(ctx: Context, id: string, everySeconds = 1): Promise<{ activityId: string; records: unknown[] }> {
   const records = (await fitFor(ctx, id)).records ?? [];
   return { activityId: id, records: downsample(records as { timestamp?: unknown }[], everySeconds) };
+}
+
+/** Bound each page by serialized size as well as count, without discarding any samples. */
+export function recordsPage(id: string, records: unknown[], offset = 0, limit = 100) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > records.length) throw new GarminError("offset must be between 0 and totalRecords");
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new GarminError("limit must be between 1 and 500");
+  const page: unknown[] = [];
+  // Reserve room for metadata; keep pages comfortably below the model-facing cap.
+  const budget = Math.floor(MAX_RESULT_CHARS / 2);
+  let size = serialize({ activityId: id, records: [], offset, totalRecords: records.length, nextOffset: records.length }).length;
+  for (let i = offset; i < Math.min(records.length, offset + limit); i++) {
+    const added = serialize([records[i]]).length - 2 + (page.length ? 1 : 0);
+    if (size + added > budget) {
+      if (!page.length) throw new GarminError(`Record at offset ${i} exceeds the page size limit.`);
+      break;
+    }
+    page.push(records[i]);
+    size += added;
+  }
+  const end = offset + page.length;
+  return { activityId: id, records: page, offset, totalRecords: records.length, nextOffset: end < records.length ? end : null };
 }
 
 export async function downloadActivity(ctx: Context, opts: { id: string; format?: "fit" | "zip" | "json"; output?: string }): Promise<string> {
@@ -245,6 +268,16 @@ export const tools: readonly Tool[] = [
     description: "Parsed FIT lap messages for an activity (raw, verbose). Prefer analyse_run for splits.",
     input: z.strictObject({ activityId: activity }),
     run: (input, ctx) => getLaps(ctx, input.activityId),
+  }),
+  defineTool({
+    name: "get_records_page", cli: "records-page", surfaces: ["mcp"], access: "read",
+    description: "Lossless paginated FIT samples including GPS. Start with offset 0; repeat with nextOffset until null. No downsampling. Pages are bounded by count and serialized size. Each call downloads and parses the activity again; use get_records for small results.",
+    input: z.strictObject({
+      activityId: activity,
+      offset: integer(0, Number.MAX_SAFE_INTEGER).default(0).describe("Record offset; use nextOffset from the previous page"),
+      limit: integer(1, 500).default(100).describe("Maximum samples per page; large samples may produce smaller pages"),
+    }),
+    run: async (input, ctx) => recordsPage(input.activityId, (await fitFor(ctx, input.activityId)).records ?? [], input.offset, input.limit),
   }),
   defineTool({
     name: "get_records", cli: "records", surfaces: ["cli", "mcp"], access: "read", positional: ["activityId"],

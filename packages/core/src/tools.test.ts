@@ -2,10 +2,40 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { GarminError } from "./errors.js";
 import { inputSchema, commandLine } from "./schema.js";
-import { checkOutputPath, downsample, previousRuns, resolveRange, tools } from "./tools.js";
+import { checkOutputPath, downsample, previousRuns, recordsPage, resolveRange, tools } from "./tools.js";
+import { serialize } from "./output.js";
+import { MAX_RESULT_CHARS } from "./limits.js";
 
 const tool = (name: string) => tools.find((t) => t.name === name)!;
 const rejects = (name: string, raw: unknown, pattern: RegExp) => assert.throws(() => tool(name).validate(raw), (e) => e instanceof GarminError && pattern.test(e.message));
+
+test("record pages reconstruct full-resolution data above the response cap", () => {
+  const records = Array.from({ length: 1100 }, (_, i) => ({ timestamp: i, note: "\u009b".repeat(300) }));
+  assert.ok(serialize(records).length > MAX_RESULT_CHARS);
+  const collected: unknown[] = [];
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const page = recordsPage("1", records, offset, 500);
+    assert.ok(serialize(page).length <= MAX_RESULT_CHARS / 2);
+    assert.equal(page.totalRecords, records.length);
+    assert.ok(page.records.length > 0);
+    collected.push(...page.records);
+    if (page.nextOffset !== null) assert.ok(page.nextOffset > offset);
+    offset = page.nextOffset;
+  }
+  assert.deepEqual(collected, records);
+});
+
+test("record pagination handles empty, exact and invalid boundaries", () => {
+  assert.equal(recordsPage("1", []).nextOffset, null);
+  assert.deepEqual(recordsPage("1", [1, 2], 2).records, []);
+  assert.equal(recordsPage("1", [1, 2], 0, 2).nextOffset, null);
+  for (const offset of [-1, 1.5, 3]) assert.throws(() => recordsPage("1", [1, 2], offset), /offset/);
+  assert.throws(() => recordsPage("1", ["x".repeat(MAX_RESULT_CHARS)]), /Record at offset 0 exceeds/);
+  rejects("get_records_page", { activityId: "1", offset: -1 }, /between/);
+  rejects("get_records_page", { activityId: "1", limit: 501 }, /between/);
+  assert.deepEqual(tool("get_records_page").validate({ activityId: "1" }), { activityId: "1", offset: 0, limit: 100 });
+});
 
 test("output paths must be relative with no parent traversal", () => {
   for (const ok of ["run.fit", "out/run.fit", "./run.fit", "a..b.fit"]) assert.equal(checkOutputPath(ok), true, ok);

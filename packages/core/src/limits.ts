@@ -3,7 +3,7 @@ export const MAX_RESPONSE_BYTES = 64 * 1024 * 1024; // largest HTTP body we buff
 export const MAX_FIT_BYTES = 100 * 1024 * 1024; // largest decompressed FIT file we accept
 export const MAX_ZIP_ENTRIES = 64; // Garmin's export holds one .fit; refuse archives with many entries before parsing them
 
-export const OVERSIZE_HINT = "Narrow the request (for example a larger everySeconds for records), or use analyse_run.";
+export const OVERSIZE_HINT = "For full-resolution records, use get_records_page and follow nextOffset until null. Otherwise narrow the request or use analyse_run.";
 
 import { GarminError } from "./errors.js";
 
